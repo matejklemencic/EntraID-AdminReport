@@ -4,20 +4,13 @@ Generates an interactive, self-contained HTML report of every administrator acco
 
 Service principals with roles are out of scope; the report covers user accounts only.
 
-## Demo
+## Live demo
 
-[![Entra ID Administrator Report preview](docs/images/report-preview.png)](docs/demo/index.html)
+Try the report in your browser with fictional sample data (filters, sorting, detail modals and dark mode all work):
 
-Three demo reports for a fictional tenant (Contoso Ltd) show the three baselines. Open a file in a browser; no server is needed. If you publish the repo with GitHub Pages, they are served from `/docs/demo/`.
+[![Entra ID Administrator Report preview](docs/images/report-preview.png)](https://matejklemencic.github.io/EntraID-AdminReport/demo/)
 
-
-| Demo | Baseline | Shows |
-|------|----------|-------|
-| [docs/demo/index.html](docs/demo/index.html) | P2 | Everything: synced and guest admins, standing and eligible roles, roles through groups and PIM for Groups, phishing-resistant method gaps, Conditional Access gaps, break-glass and Entra Connect sync accounts |
-| [docs/demo/p1.html](docs/demo/p1.html) | P1 | The same tenant without PIM |
-| [docs/demo/free.html](docs/demo/free.html) | Free | Security defaults enabled; sign-in activity, authentication methods, Conditional Access and PIM show "Not assessed" |
-
-To rebuild them, run `pwsh -File tools/Build-Demos.ps1`. The data generator in `tools/` is fictional and replaces the Microsoft Graph calls, so no tenant is contacted.
+**[▶ Open the live demo](https://matejklemencic.github.io/EntraID-AdminReport/demo/)**
 
 ## What it does
 
@@ -297,9 +290,9 @@ The HTML report is published as the pipeline artifact `EntraIDAdminReport`. The 
 |------|---------|
 | `Get-EntraIDAdminReport.ps1` | Main script |
 | `azure-pipelines.yml` | Azure DevOps pipeline definition |
-| `docs/demo/index.html`, `p1.html`, `free.html` | Sample reports with fictional data for the P2, P1 and Free baselines |
-| `tools/Build-Demos.ps1`, `tools/demo-mock.ps1` | Rebuild the three demos from fictional data (no tenant is contacted) |
-| `docs/images/report-preview.png` | Screenshot used in the demo section |
+| `docs/demo/index.html` | Sample report with fictional data (P2 baseline), published as the live demo through GitHub Pages |
+| `tools/Build-Demos.ps1`, `tools/demo-mock.ps1` | Rebuild the demo from fictional data (no tenant is contacted) |
+| `docs/images/report-preview.png` | Screenshot used in the live demo section |
 
 ## Author
 
