@@ -1,0 +1,106 @@
+# Entra ID Administrator Report — Azure DevOps Pipeline
+# Uses an Azure service connection (azureSubscription) for auth — no secrets stored in ADO.
+#
+# PREREQUISITES
+# -------------
+# 1. Create an Azure service connection in ADO pointing to your tenant.
+#    The service principal behind it needs these Entra ID Application permissions (admin consent required).
+#    What is needed depends on the licenseBaseline variable below:
+#      Free, P1 and P2:
+#      - User.Read.All
+#      - Directory.Read.All                               (groups, group members and owners, licenses)
+#      - RoleManagement.Read.Directory                    (role assignments)
+#      - Policy.Read.All                                  (security defaults; with P1/P2 also Conditional Access)
+#      P1 and P2 add:
+#      - AuditLog.Read.All                                (sign-in activity and authentication methods)
+#      - CrossTenantInformation.ReadBasic.All             (MFA trust of guests from Microsoft Entra tenants)
+#      P2 adds:
+#      - PrivilegedEligibilitySchedule.Read.AzureADGroup  (PIM for Groups eligibility)
+#
+# 2. Update 'azureSubscription' below to match your ADO service connection name.
+
+trigger:
+  - main
+
+schedules:
+  - cron: "0 6 * * 1"          # Every Monday at 06:00 UTC
+    displayName: Weekly Monday report
+    branches:
+      include:
+        - main
+    always: true                # Run even if no code changes
+
+pool:
+  vmImage: ubuntu-24.04
+
+variables:
+  psModuleCache: $(Pipeline.Workspace)/.psmodules
+  # The Microsoft Entra ID license level the report is assessed against: Free, P1 or P2 (required)
+  licenseBaseline: "P1"
+  # Comma-separated user principal names or object IDs of the emergency access accounts (optional)
+  breakGlassAccounts: ""
+
+steps:
+  - checkout: self
+    fetchDepth: 1
+
+  # Restore the Graph module saved by a previous run; the post-job step of this task
+  # saves the folder again if the install step below changed it (first run only).
+  - task: Cache@2
+    displayName: "Cache Microsoft Graph modules"
+    inputs:
+      # Bump the trailing suffix whenever the module list below changes — Cache@2 only
+      # saves on a key miss, so a stale key would never persist newly added modules.
+      key: 'psmodules | "$(Agent.OS)" | graph-auth-v1'
+      path: $(psModuleCache)
+
+  # The script calls Microsoft Graph directly through Invoke-MgGraphRequest, so only the
+  # authentication module is needed. Save-PSResource (PSResourceGet, ships with PowerShell 7.4+)
+  # is much faster than Install-Module and is skipped when the cache restore already provided it.
+  - pwsh: |
+      New-Item -ItemType Directory -Force -Path "$(psModuleCache)" | Out-Null
+      @(
+          'Microsoft.Graph.Authentication'
+      ) | ForEach-Object {
+          if (Test-Path (Join-Path "$(psModuleCache)" $_)) {
+              Write-Host "$_ already cached"
+          } else {
+              Write-Host "Saving $_ ..."
+              Save-PSResource -Name $_ -Version '[2.0.0,)' -Path "$(psModuleCache)" -TrustRepository
+          }
+      }
+    displayName: "Install Microsoft Graph modules (cache miss only)"
+
+  - task: AzurePowerShell@5
+    displayName: "Generate Entra ID Administrator Report"
+    retryCountOnTaskFailure: 1
+    inputs:
+      azureSubscription: "<YOUR_AZURE_SERVICE_CONNECTION_NAME>"   # <-- update this
+      pwsh: true
+      azurePowerShellVersion: LatestVersion
+      ScriptType: InlineScript
+      Inline: |
+        # Make the cached Graph modules discoverable
+        $env:PSModulePath = "$(psModuleCache)" + [IO.Path]::PathSeparator + $env:PSModulePath
+
+        # Get a Graph access token from the Az service connection context
+        $graphToken = (Get-AzAccessToken -ResourceTypeName MSGraph -AsSecureString).Token
+
+        # Run the report
+        $outputPath = "$(Build.ArtifactStagingDirectory)/EntraIDAdminReport_$(Get-Date -Format 'yyyy-MM-dd').html"
+        $reportParams = @{
+          LicenseBaseline = "$(licenseBaseline)"
+          AccessToken    = $graphToken
+          NonInteractive = $true
+          OutputPath     = $outputPath
+        }
+        if ("$(breakGlassAccounts)") { $reportParams.BreakGlassAccounts = "$(breakGlassAccounts)" }
+
+        & "$(Build.SourcesDirectory)/Get-EntraIDAdminReport.ps1" @reportParams
+
+        Write-Host "##[section]Report saved to: $outputPath"
+
+  - publish: $(Build.ArtifactStagingDirectory)
+    displayName: Publish Report Artifact
+    artifact: EntraIDAdminReport
+    condition: always()
