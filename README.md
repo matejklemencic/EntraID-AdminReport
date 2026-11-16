@@ -248,7 +248,7 @@ Eligible assignments need Privileged Identity Management (Entra ID P2 or Entra I
 | `-InactiveDays` | Int | `90` | Days without a sign-in after which an administrator is flagged as inactive. |
 | `-MaxSignInFrequencyHours` | Int | `4` | Longest sign-in frequency, in hours, accepted for administrators in the Conditional Access review. Used only with the P1 and P2 baselines. |
 | `-TenantId` | String | None | Entra ID tenant ID. Required for Service Principal authentication. |
-| `-OutputPath` | String | Auto-generated | Path for the HTML report. Defaults to `EntraIDAdminReport_{TenantName}_{Date}.html`. |
+| `-OutputPath` | String | Auto-generated | Path for the HTML report. Defaults to `EntraIDAdminReport_{TenantName}_{yyyy-MM-dd_HHmmss}.html` with the time in UTC. A path you pass is used unchanged. The CSV export uses the same name with `.csv`. |
 | `-DryRun` | Switch | None | Run the analysis but skip writing the report and opening the browser. |
 | `-NonInteractive` | Switch | None | Suppress prompts and the browser launch. Required for pipeline runs. |
 | `-UseManagedIdentity` | Switch | None | Authenticate with the Managed Identity of the host. Add `-ClientId` for a user-assigned identity. |
@@ -291,7 +291,6 @@ The HTML report is published as the pipeline artifact `EntraIDAdminReport`. The 
 | `Get-EntraIDAdminReport.ps1` | Main script |
 | `azure-pipelines.yml` | Azure DevOps pipeline definition |
 | `docs/demo/index.html` | Sample report with fictional data (P2 baseline), published as the live demo through GitHub Pages |
-| `tools/Build-Demos.ps1`, `tools/demo-mock.ps1` | Rebuild the demo from fictional data (no tenant is contacted) |
 | `docs/images/report-preview.png` | Screenshot used in the live demo section |
 
 ## Author

@@ -35,7 +35,7 @@
 .PARAMETER TenantId
     Optional. The Entra ID tenant ID to connect to. Required when using Service Principal authentication.
 .PARAMETER OutputPath
-    Path to save the generated HTML report. Defaults to "EntraIDAdminReport_{TenantName}_{Date}.html".
+    Path to save the generated HTML report. Defaults to "EntraIDAdminReport_{TenantName}_{yyyy-MM-dd_HHmmss}.html" with the time in UTC. A path you pass is used unchanged. The CSV export uses the same name with the .csv extension.
 .PARAMETER InactiveDays
     Number of days without a sign-in after which an administrator account is flagged as inactive.
     Default is 90.
@@ -1921,9 +1921,12 @@ if ($script:caDataAvailable -and $script:securityDefaultsKnown) {
 if (-not $script:pimBaseline) { $tenantFindings.Add((New-Reason 'info' 'Privileged Identity Management is not part of the assessment baseline. Role assignments are shown as assigned.')) }
 if ($script:sdConflict) { $tenantAccessBanner += '<!-- debug: security defaults are reported as enabled while Conditional Access policies are enabled; the Conditional Access logic was used -->' }
 
+# One UTC time stamp for the HTML and CSV file names
+$safeName = $tenantName -replace '[^\w]', '_'
+$fileStamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd_HHmmss')
+$fileBaseName = "EntraIDAdminReport_${safeName}_${fileStamp}"
 if (-not $OutputPath) {
-    $safeName = $tenantName -replace '[^\w]', '_'
-    $OutputPath = "EntraIDAdminReport_${safeName}_$(Get-Date -Format 'yyyy-MM-dd').html"
+    $OutputPath = "$fileBaseName.html"
 }
 
 # Resolve a relative output path against the current PowerShell location.
@@ -3042,6 +3045,7 @@ $reportDetailsBlock = "const reportDetails = {`n" + ($modalDataEntries -join ",`
 
     <script>
         $reportDetailsBlock
+        const csvFileName = $(ConvertTo-JsString "$fileBaseName.csv");
 "@)
 
 [void]$sb.Append(@'
@@ -3304,7 +3308,7 @@ $reportDetailsBlock = "const reportDetails = {`n" + ($modalDataEntries -join ",`
             });
 
             // UTF-8 BOM ensures Excel opens the file with correct encoding
-            downloadFile('\uFEFF' + lines.join('\r\n'), 'EntraIDAdminReport_' + new Date().toISOString().slice(0, 10) + '.csv');
+            downloadFile('\uFEFF' + lines.join('\r\n'), csvFileName);
         }
 
         function downloadFile(content, fileName) {

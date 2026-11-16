@@ -7,3 +7,6 @@
 
 # Local pre-release review notes
 PRE-RELEASE-REVIEW.md
+
+# Demo generator (local only)
+tools/
