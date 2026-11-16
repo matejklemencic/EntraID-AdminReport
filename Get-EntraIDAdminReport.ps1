@@ -457,8 +457,12 @@ function Get-AccessVerdictKey {
     if ($Admin.SyncAccount -eq 'connector') { return 'na' }
     # Security defaults cover every other account, break-glass accounts included
     if ($script:sdEffective) { return 'sd' }
-    # A break-glass account should be excluded from the policies: an enabled policy that applies is a red verdict
-    if ($Admin.IsBreakGlass) { return $(if ($Admin.CaKey -in @('excluded', 'na', 'nc')) { 'na' } else { 'policy' }) }
+    # A break-glass account should be excluded from the policies: an enabled policy that applies is red, a report-only one amber, none is green
+    if ($Admin.IsBreakGlass) {
+        if ($Admin.CaKey -in @('na', 'nc')) { return 'na' }
+        if ($Admin.CaKey -ne 'excluded') { return 'policy' }
+        return $(if (@($Admin.CaPolicies | Where-Object { $_.State -ne 'enabled' -and $_.Result -eq 'yes' }).Count -gt 0) { 'reportonly' } else { 'excluded' })
+    }
     if ($Admin.CaKey -in @('excluded', 'na')) { return 'na' }
     $trustedLocation = $Admin.LocKey -in @('gsa', 'ip')
     if ($Admin.CaKey -eq 'pr') {
@@ -672,12 +676,58 @@ function New-NoMfaNoCaModalHtml {
     return $html
 }
 
+# Access protection modal for a break-glass account: which Conditional Access policies apply, which are report-only, which exclude it
+function New-BreakGlassAccessModalHtml {
+    param($Admin)
+    $enabledTargeting = @($Admin.CaPolicies | Where-Object { $_.State -eq 'enabled' -and $_.Result -in @('yes', 'excluded') })
+    $applying = @($Admin.CaPolicies | Where-Object { $_.State -eq 'enabled' -and $_.Result -eq 'yes' } | Sort-Object Name)
+    $reportOnly = @($Admin.CaPolicies | Where-Object { $_.State -ne 'enabled' -and $_.Result -eq 'yes' } | Sort-Object Name)
+    $excluded = @($Admin.CaPolicies | Where-Object { $_.Result -eq 'excluded' } | Sort-Object @{ Expression = { $_.State -ne 'enabled' } }, Name)
+    $n = $enabledTargeting.Count
+    if ($applying.Count -gt 0) {
+        $state = 'red'
+        $bannerText = "$($applying.Count) enabled Conditional Access polic$(if ($applying.Count -eq 1) { 'y applies' } else { 'ies apply' })"
+    } elseif ($reportOnly.Count -gt 0) {
+        $state = 'amber'
+        $lead = if ($n -gt 0) { "Excluded from all $n enabled polic$(if ($n -eq 1) { 'y' } else { 'ies' })" } else { 'No enabled Conditional Access policy targets this account' }
+        $bannerText = "$lead. $($reportOnly.Count) report-only polic$(if ($reportOnly.Count -eq 1) { 'y applies' } else { 'ies apply' })"
+    } else {
+        $state = 'green'
+        $bannerText = if ($n -gt 0) { "Excluded from all $n enabled Conditional Access polic$(if ($n -eq 1) { 'y' } else { 'ies' })" } else { 'No enabled Conditional Access policy targets this account' }
+    }
+    $html = ''
+    if ($script:securityDefaults) { $html += "<div class='modal-banner blue'><span class='modal-dot'></span><span>Security defaults are enabled in this tenant and require MFA for administrators.</span></div>" }
+    $html += "<div class='modal-banner $state'><span class='modal-dot'></span><span>$bannerText</span></div>"
+
+    $headerStyle = "text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)"
+    $tableHtml = { param($rowsHtml) "<table class='ap-bg-table' style='width:100%;border-collapse:collapse;font-size:13px'><thead><tr><th style='$headerStyle'>Policy</th><th style='$headerStyle'>Result</th></tr></thead><tbody>$rowsHtml</tbody></table>" }
+    if ($Admin.CaPolicies.Count -eq 0) {
+        $html += "<p class='muted' style='margin-top:14px'>No Conditional Access policy targets this account.</p>"
+    } else {
+        $rows = (@($applying | ForEach-Object { New-ModalRowHtml @((ConvertTo-HtmlSafe $_.Name), "<span class='auth-chip red'>Applies: $(ConvertTo-HtmlSafe $_.Why)</span>") }) +
+                 @($reportOnly | ForEach-Object { New-ModalRowHtml @((ConvertTo-HtmlSafe $_.Name), "<span class='auth-chip amber'>Report-only: $(ConvertTo-HtmlSafe $_.Why)</span>") })) -join ''
+        if ($rows) { $html += "<div style='margin-top:14px'>$(& $tableHtml $rows)</div>" }
+        if ($excluded.Count -gt 0) {
+            $exRows = ($excluded | ForEach-Object { New-ModalRowHtml @((ConvertTo-HtmlSafe $_.Name), "<span class='auth-chip green'>$(ConvertTo-HtmlSafe $_.Why)</span>") }) -join ''
+            $html += "<details class='ap-details ap-excluded'><summary>$($excluded.Count) excluded polic$(if ($excluded.Count -eq 1) { 'y' } else { 'ies' }) <span class='auth-chip green'>Excluded</span></summary>$(& $tableHtml $exRows)</details>"
+        }
+    }
+
+    switch ($state) {
+        'red'   { $html += "<div class='modal-rec'><strong>Recommended:</strong> Exclude this account from every policy that blocks or restricts sign-in.</div>" }
+        'amber' { $html += "<div class='modal-rec'><strong>Recommended:</strong> Exclude the account before you enable the report-only polic$(if ($reportOnly.Count -eq 1) { 'y' } else { 'ies' }), or it will be locked out.</div>" }
+        default { $html += "<div class='modal-note'>Emergency access accounts are meant to stay outside these policies.</div>" }
+    }
+    return $html
+}
+
 # Body of the access protection modal
 function New-AccessModalHtml {
     param($Admin, [string]$Verdict)
     if ($Verdict -eq 'sd') { return (New-SecurityDefaultsModalHtml $Admin) }
+    if ($Admin.IsBreakGlass -and $Admin.CaCollected -and $Verdict -in @('na', 'policy', 'excluded', 'reportonly')) { return (New-BreakGlassAccessModalHtml $Admin) }
     if ($Verdict -eq 'none' -and -not $script:caBaseline -and $script:securityDefaultsKnown) { return (New-NoMfaNoCaModalHtml) }
-    $bannerClass = switch ($Verdict) { 'strong' { 'green' } 'good' { 'green' } 'mfaonly' { 'amber' } 'weak' { 'amber' } 'none' { 'red' } 'policy' { 'red' } default { 'gray' } }
+    $bannerClass = switch ($Verdict) { 'strong' { 'green' } 'good' { 'green' } 'mfaonly' { 'amber' } 'weak' { 'amber' } 'none' { 'red' } 'policy' { 'red' } 'excluded' { 'green' } 'reportonly' { 'amber' } default { 'gray' } }
     $bannerText = switch ($Verdict) {
         'strong'  { 'Strong - phishing-resistant MFA, compliant device and trusted location' }
         'good'    { "Good - phishing-resistant MFA plus $(if ($Admin.DeviceKey -eq 'device') { 'compliant device' } else { 'trusted location' })" }
@@ -685,14 +735,16 @@ function New-AccessModalHtml {
         'weak'    { 'MFA is not phishing-resistant or covers only some resources' }
         'none'    { 'No Conditional Access policy requires MFA for this account' }
         'policy'  { 'Break-glass account - an enabled Conditional Access policy applies' }
+        'excluded' { 'Break-glass account - excluded from the enabled Conditional Access policies' }
+        'reportonly' { 'Break-glass account - a report-only Conditional Access policy applies' }
         default   { 'Break-glass account - does not apply' }
     }
     $html = ''
-    if ($script:securityDefaults) { $html += "<div class='info-banner'>Security defaults are enabled in this tenant and require MFA for administrators.</div>" }
+    if ($script:securityDefaults) { $html += "<div class='modal-banner blue'><span class='modal-dot'></span><span>Security defaults are enabled in this tenant and require MFA for administrators.</span></div>" }
     $html += "<div class='modal-banner $bannerClass'><span class='modal-dot'></span><span>$bannerText</span></div>"
 
     if ($Verdict -eq 'policy') { $html += "<div class='modal-rec'><strong>Recommended:</strong> Exclude this account from every policy that blocks or restricts sign-in.</div>" }
-    if ($Verdict -notin @('na', 'policy')) {
+    if ($Verdict -notin @('na', 'policy', 'excluded', 'reportonly')) {
         $stateText = @{ met = 'Met'; weaker = 'Weaker'; missing = 'Missing' }
         foreach ($req in (Get-AccessRequirements $Admin)) {
             $html += "<div class='req-row'><span class='req-pill $($req.State)'>$($stateText[$req.State])</span><div><div class='req-label'>$($req.Label)<span class='muted' style='font-weight:400'>$($req.Sub)</span></div><div class='req-detail'>$($req.Detail)</div></div></div>"
@@ -760,7 +812,8 @@ function Get-NotificationFindings {
     $out = [System.Collections.Generic.List[object]]::new()
     $notifyRoles = @($Admin.Roles | Where-Object { $_.Kind -eq 'Entra' -and $_.RoleId -in $NotificationRoleIds -and $_.Type -in @('Active', 'Eligible') -and $_.ScopeKind -eq 'tenant' })
     $directNotify = @($notifyRoles | Where-Object { -not $_.ViaGroupId })
-    if (-not $Admin.Mail -and $Admin.OtherMails.Count -eq 0) {
+    # Emergency access accounts are not checked for a notification email
+    if (-not $Admin.IsBreakGlass -and -not $Admin.Mail -and $Admin.OtherMails.Count -eq 0) {
         if ($directNotify.Count -gt 0) {
             $names = (@($directNotify | ForEach-Object { $_.Role }) | Sort-Object -Unique) -join ', '
             $out.Add((New-Reason 'medium' 'No Email or Alternate email set, so role alerts reach nobody. Set the Email attribute to a plus address.' -Detail "Holds $names. Use a plus address of the owner's personal mailbox."))
@@ -809,9 +862,10 @@ function New-RoleGroupHtml {
 function Get-RoleSummaryHtml {
     param([int]$Total, [int]$Privileged, [int]$PermanentPrivileged, [int]$TenantWide = 0, [int]$Scoped = 0)
     $summary = if ($Total -eq 0) { 'No roles assigned' }
-               elseif ($Privileged -eq 0) { "<strong class='role-ok'>No privileged roles</strong> &middot; $Total role$(if ($Total -ne 1) { 's' }) assigned" }
+               elseif ($Privileged -eq 0 -and $Total -eq 1) { "<strong class='role-ok'>Not a privileged role</strong>" }
+               elseif ($Privileged -eq 0) { "<strong class='role-ok'>No privileged roles</strong> &middot; $Total roles assigned" }
                else {
-                   $lead = if ($Privileged -eq $Total) { "All $Total role$(if ($Total -ne 1) { 's are' } else { ' is' }) privileged" } else { "$Privileged of $Total roles are privileged" }
+                   $lead = if ($Privileged -eq $Total -and $Total -eq 1) { 'Privileged role' } elseif ($Privileged -eq $Total) { "All $Total roles are privileged" } else { "$Privileged of $Total roles are privileged" }
                    # Only when a privileged role is limited to an administrative unit or object: the tenant-wide / scoped split
                    if ($Scoped -gt 0) { $lead += " &middot; $TenantWide tenant-wide &middot; $Scoped scoped" }
                    if ($PermanentPrivileged -gt 0) {
@@ -1174,6 +1228,14 @@ function Get-AdminAssessment {
             $enforced = @($Admin.CaPolicies | Where-Object { $_.Result -eq 'yes' -and $_.State -eq 'enabled' })
             if ($enforced.Count -gt 0) {
                 $findings.Add((New-Reason 'high' 'Enabled Conditional Access policies apply to this account. Exclude it from policies that block or restrict sign-in' -Detail "Policies: $((@($enforced | ForEach-Object { $_.Name }) | Select-Object -First 5) -join ', ')."))
+            } else {
+                $reportOnlyApplying = @($Admin.CaPolicies | Where-Object { $_.Result -eq 'yes' -and $_.State -ne 'enabled' } | Sort-Object Name)
+                if ($reportOnlyApplying.Count -gt 0) {
+                    $roNames = @($reportOnlyApplying | ForEach-Object { $_.Name })
+                    $roShort = ($roNames | Select-Object -First 2) -join ', '
+                    if ($roNames.Count -gt 2) { $roShort += " (+$($roNames.Count - 2) more)" }
+                    $findings.Add((New-Reason 'info' "Report-only Conditional Access polic$(if ($roNames.Count -eq 1) { 'y' } else { 'ies' }) $roShort $(if ($roNames.Count -eq 1) { 'applies' } else { 'apply' }) to this account. Exclude the account before $(if ($roNames.Count -eq 1) { 'it is' } else { 'they are' }) enabled" -Detail "Policies: $($roNames -join ', ')."))
+                }
             }
         }
         return $findings
@@ -2369,6 +2431,8 @@ $sb = [System.Text.StringBuilder]::new()
         .ap-details summary::-webkit-details-marker { display: none; }
         .ap-details summary::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 8px 1px 2px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform 0.15s; }
         .ap-details[open] summary::before { transform: rotate(45deg); }
+        .ap-details summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
+        .ap-details summary .auth-chip { margin-left: 10px; text-transform: none; letter-spacing: 0; }
 
         .mono { font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 400; color: var(--gray-dark); letter-spacing: 0.5px; }
         .muted { color: var(--text-muted); }
@@ -2552,6 +2616,8 @@ $authFilter = if ($script:authDataAvailable) { @"
 "@ } else { '' }
 $accessPimTags = if ($script:pimBaseline) { "<span class=`"filter-tag c-amber`"  data-group=`"access`" data-value=`"standing`"   onclick=`"toggleTag(this)`">Standing privileged <span class=`"cnt`"></span></span>`n            <span class=`"filter-tag c-blue`"   data-group=`"access`" data-value=`"eligible`"   onclick=`"toggleTag(this)`">Eligible (PIM) <span class=`"cnt`"></span></span>" } else { '' }
 $policyFilterTag = if (@($report | Where-Object { $_.AccessKey -eq 'policy' }).Count -gt 0) { "<span class=`"filter-tag c-red`" data-group=`"protection`" data-value=`"policy`" onclick=`"toggleTag(this)`">Policy applies <span class=`"cnt`"></span></span>" } else { '' }
+$reportOnlyFilterTag = if (@($report | Where-Object { $_.AccessKey -eq 'reportonly' }).Count -gt 0) { "<span class=`"filter-tag c-amber`" data-group=`"protection`" data-value=`"reportonly`" onclick=`"toggleTag(this)`">Report-only <span class=`"cnt`"></span></span>" } else { '' }
+$excludedFilterTag = if (@($report | Where-Object { $_.AccessKey -eq 'excluded' }).Count -gt 0) { "<span class=`"filter-tag c-green`" data-group=`"protection`" data-value=`"excluded`" onclick=`"toggleTag(this)`">Excluded <span class=`"cnt`"></span></span>" } else { '' }
 $sdFilterTag = if (@($report | Where-Object { $_.AccessKey -eq 'sd' }).Count -gt 0) { "<span class=`"filter-tag c-blue`" data-group=`"protection`" data-value=`"sd`" onclick=`"toggleTag(this)`">Security defaults <span class=`"cnt`"></span></span>" } else { '' }
 $devLocFilterHtml = if ($script:caBaseline) { @"
         <div class="filter-group">
@@ -2579,12 +2645,14 @@ $caFilter = if ($script:caDataAvailable) { @"
             <span class="filter-tag c-red"    data-group="protection" data-value="none"    onclick="toggleTag(this)">None <span class="cnt"></span></span>
             $sdFilterTag
             $policyFilterTag
+            $reportOnlyFilterTag
+            $excludedFilterTag
             <span class="filter-tag c-gray"   data-group="protection" data-value="na"      onclick="toggleTag(this)">N/A <span class="cnt"></span></span>
         </div>
 $devLocFilterHtml
 "@ } else { '' }
-# Alerts is N/A for Entra Connect sync accounts; the tag only appears when the report has such accounts
-$notifyNaTag = if ($connectorCount -gt 0) { "<span class=`"filter-tag c-gray`" data-group=`"notify`" data-value=`"na`" onclick=`"toggleTag(this)`">N/A <span class=`"cnt`"></span></span>" } else { '' }
+# Alerts is N/A for Entra Connect sync accounts and for break-glass accounts without an email; the tag only appears when the report has such accounts
+$notifyNaTag = if ($connectorCount -gt 0 -or @($report | Where-Object { $_.IsBreakGlass -and -not $_.Mail -and $_.OtherMails.Count -eq 0 }).Count -gt 0) { "<span class=`"filter-tag c-gray`" data-group=`"notify`" data-value=`"na`" onclick=`"toggleTag(this)`">N/A <span class=`"cnt`"></span></span>" } else { '' }
 $unknownActivityTag = if (-not $script:signInDataAvailable) {
     "<span class='filter-tag c-gray' data-group='activity' data-value='unknown' onclick='toggleTag(this)'>Unknown <span class='cnt'></span></span>"
 } else { '' }
@@ -2856,7 +2924,9 @@ foreach ($a in $sortedReport) {
     if ($a.CaCollected) {
         $modal.Add("caTitle: $(ConvertTo-JsString "Access protection"), caHtml: $(ConvertTo-JsString (New-AccessModalHtml $a $accessKey))")
         $caOnClick = Get-ModalOnClick $key 'ca'
-        $accessCsv = switch ($accessKey) { 'strong' { 'Strong' } 'good' { 'Good' } 'mfaonly' { 'MFA only' } 'weak' { 'Weak' } 'none' { 'None' } 'sd' { 'Security defaults' } 'policy' { 'Policy applies' } 'na' { 'N/A' } default { 'Unknown' } }
+        $accessCsv = switch ($accessKey) { 'strong' { 'Strong' } 'good' { 'Good' } 'mfaonly' { 'MFA only' } 'weak' { 'Weak' } 'none' { 'None' } 'sd' { 'Security defaults' } 'policy' { 'Policy applies' } 'excluded' { 'Excluded' } 'reportonly' { 'Report-only' } 'na' { 'N/A' } default { 'Unknown' } }
+        $bgTargeting = @($a.CaPolicies | Where-Object { $_.State -eq 'enabled' -and $_.Result -in @('yes', 'excluded') }).Count
+        $excludedTip = if ($bgTargeting -gt 0) { "Excluded from $(if ($bgTargeting -eq 1) { 'the 1 enabled Conditional Access policy' } else { "all $bgTargeting enabled Conditional Access policies" }), as recommended for an emergency access account. Click for details." } elseif ($a.CaPolicies.Count -eq 0) { 'No Conditional Access policy targets this account. Click for details.' } else { 'No enabled Conditional Access policy targets this account. Click for details.' }
         $verdictBadge = switch ($accessKey) {
             'strong'  { @('green', 'Strong', 'Phishing-resistant MFA plus a compliant device and a trusted location. Click for details.') }
             'good'    { @('green', 'Good', 'Phishing-resistant MFA plus a compliant device or a trusted location. Click for details.') }
@@ -2865,10 +2935,12 @@ foreach ($a in $sortedReport) {
             'none'    { @('red', 'None', 'No Conditional Access policy requires MFA for this account. Click for details.') }
             'sd'      { @('blue', 'Security defaults', 'Security defaults require MFA on every sign-in for this account. Click for details.') }
             'policy'  { @('red', 'Policy applies', 'An enabled Conditional Access policy applies to this break-glass account. Click for details.') }
+            'excluded'   { @('green', 'Excluded', $excludedTip) }
+            'reportonly' { @('amber', 'Report-only', 'A report-only Conditional Access policy applies. Exclude the account before it is enabled. Click for details.') }
             default   { @('gray', 'N/A', 'Does not apply (break-glass or sync account). Click for details.') }
         }
         $strip = ''
-        if ($accessKey -notin @('na', 'policy', 'sd')) {
+        if ($accessKey -notin @('na', 'policy', 'excluded', 'reportonly', 'sd')) {
             $pillState = {
                 param($state, $name, $tip)
                 $symbol = switch ($state) { 'ok' { '&#10003;' } 'warn' { '~' } default { '&ndash;' } }
@@ -2887,7 +2959,7 @@ foreach ($a in $sortedReport) {
         }
         $caText = "<span class='perm-badges'>$(New-BadgeHtml $verdictBadge[0] $verdictBadge[1] $verdictBadge[2] '' '' $caOnClick)$strip</span>"
     }
-    $rank = @{ policy = 0; none = 1; weak = 2; mfaonly = 3; good = 4; strong = 5; sd = 6; nc = 7; na = 8 }
+    $rank = @{ policy = 0; none = 1; weak = 2; mfaonly = 3; reportonly = 4; good = 5; strong = 6; sd = 7; excluded = 8; nc = 9; na = 10 }
     $accessSort = "$($rank[$accessKey])-$accessKey"
     # A connector account is a service account: MFA, passkeys and Conditional Access coverage are not assessed for it
     $authAttr = $a.AuthKey; $accessAttr = $accessKey; $deviceAttr = $a.DeviceKey; $locAttr = $a.LocKey
@@ -2897,10 +2969,11 @@ foreach ($a in $sortedReport) {
         $authText = $naBadge; $caText = $naBadge; $authAttr = 'na'; $accessAttr = 'na'; $deviceAttr = 'na'; $locAttr = 'na'
     }
 
-    $notifyAttr = if ($a.SyncAccount -eq 'connector') { 'na' } elseif ($a.Mail -or $a.OtherMails.Count -gt 0) { 'set' } else { 'missing' }
+    $notifyAttr = if ($a.SyncAccount -eq 'connector' -or ($a.IsBreakGlass -and -not $a.Mail -and $a.OtherMails.Count -eq 0)) { 'na' } elseif ($a.Mail -or $a.OtherMails.Count -gt 0) { 'set' } else { 'missing' }
     # Licenses and notification email modal
     $hasMailAddr = [bool]$a.Mail -or $a.OtherMails.Count -gt 0
     $licBanner = if ($a.SyncAccount -eq 'connector') { @('gray', 'Service account - not assessed') }
+                 elseif ($a.IsBreakGlass -and -not $hasMailAddr) { @('gray', 'Emergency access account - notification email not checked') }
                  elseif (-not $hasMailAddr) { @('red', 'No notification email - alerts reach nobody') }
                  elseif ($a.LicenseKey -eq 'mailbox') { @('amber', 'Mailbox license on an admin account') }
                  elseif ($a.LicenseKey -eq 'productivity') { @('amber', 'Productivity license on an admin account') }
@@ -2924,8 +2997,7 @@ foreach ($a in $sortedReport) {
         $plusExample = "<code>name+admin@$(ConvertTo-HtmlSafe $upnDomain)</code>"
         $recommendation = $null; $mentionsPlus = $false
         if (-not $hasMailAddr) {
-            if ($a.IsBreakGlass) { $recommendation = 'Set the Email attribute to a mailbox the security team monitors, so alerts for this account are seen.' }
-            else { $recommendation = "Set the Email attribute. Idea: a plus address of the owner's mailbox, for example $plusExample"; $mentionsPlus = $true }
+            if (-not $a.IsBreakGlass) { $recommendation = "Set the Email attribute. Idea: a plus address of the owner's mailbox, for example $plusExample"; $mentionsPlus = $true }
         }
         elseif ($a.LicenseKey -eq 'mailbox') { $recommendation = "Remove the mailbox license. To keep notifications, set the Email to a plus address of the owner's mailbox, for example $plusExample"; $mentionsPlus = $true }
         elseif ($a.LicenseKey -eq 'productivity') { $recommendation = 'Remove the productivity plans. Admin accounts do not need Teams, SharePoint or Microsoft 365 Apps.' }
@@ -2936,7 +3008,7 @@ foreach ($a in $sortedReport) {
     $licOnClick = Get-ModalOnClick $key 'license'
     $licBadgeInfo = $licenseBadge[$a.LicenseKey]
     $alertBadge = switch ($notifyAttr) {
-        'na'      { New-BadgeHtml 'gray' 'Alerts: N/A' 'Not applicable: a service account does not receive alerts. Click for details.' '' '' $licOnClick }
+        'na'      { New-BadgeHtml 'gray' 'Alerts: N/A' $(if ($a.IsBreakGlass) { 'Not checked: an emergency access account does not need a notification email. Click for details.' } else { 'Not applicable: a service account does not receive alerts. Click for details.' }) '' '' $licOnClick }
         'set'     { New-BadgeHtml 'green' 'Alerts: Set' "An Email or Alternate email is set, so Entra alerts$(if ($script:pimBaseline) { ' (ID Protection, PIM)' }) have an address. Click for details." '' '' $licOnClick }
         default   { New-BadgeHtml $(if ((Get-DirectNotificationRoles $a).Count -gt 0) { 'amber' } else { 'blue' }) 'Alerts: Missing' "No Email or Alternate email is set. Entra alerts$(if ($script:pimBaseline) { ' (ID Protection, PIM)' }) reach nobody. Click for details." '' '' $licOnClick }
     }
@@ -3057,7 +3129,7 @@ $reportDetailsBlock = "const reportDetails = {`n" + ($modalDataEntries -join ",`
             auth: 'Auth methods', fallback: 'Fallback', guestidp: 'Source', protection: 'Access protection', device: 'Trusted device', loc: 'Trusted location', license: 'Licenses', notify: 'Alerts', activity: 'Last sign-in', bg: 'Break-glass', sync: 'Sync role'
         };
         const valueLabels = {
-            scoped: 'Scoped role', sd: 'Security defaults', policy: 'Policy applies', strong: 'Strong', good: 'Good', mfaonly: 'MFA only', weak: 'Weak', na: 'N/A', 'fallback:weak': 'Weak fallback (SMS / Voice)',
+            scoped: 'Scoped role', sd: 'Security defaults', policy: 'Policy applies', reportonly: 'Report-only', excluded: 'Excluded', strong: 'Strong', good: 'Good', mfaonly: 'MFA only', weak: 'Weak', na: 'N/A', 'fallback:weak': 'Weak fallback (SMS / Voice)',
             high: 'High', medium: 'Medium', low: 'Low', ok: 'OK',
             cloud: 'Cloud-only', onprem: 'On-prem synced',
             member: 'Member', guest: 'Guest',

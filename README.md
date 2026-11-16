@@ -93,7 +93,9 @@ With the P1 or P2 baseline the **Access protection** column answers one question
 | **None** | No enabled policy requires MFA | Red |
 | **Security defaults** | Security defaults are enabled (and no Conditional Access policy is enabled, because the two cannot both be active). Applies to every account except Entra Connect sync accounts, break-glass accounts included. Security defaults require MFA on every sign-in for 16 administrator roles ([list on Learn](https://learn.microsoft.com/entra/fundamentals/security-defaults#enforced-security-policies)); an account without one of them gets the weaker wording and a Low finding | Blue |
 | **Policy applies** | A break-glass account that an enabled Conditional Access policy applies to | Red |
-| **N/A** | Does not apply: break-glass accounts that are excluded from the policies, and Entra Connect sync accounts | Gray |
+| **Excluded** | A break-glass account that every enabled Conditional Access policy leaves out, as recommended | Green |
+| **Report-only** | A break-glass account that no enabled policy applies to, but a report-only policy does. Exclude it before that policy is enabled | Amber |
+| **N/A** | Does not apply: Entra Connect sync accounts, and break-glass accounts when Conditional Access was not collected | Gray |
 
 How each requirement is decided, for enabled policies that apply to the account:
 
