@@ -100,8 +100,8 @@ With the P1 or P2 baseline the **Access protection** column answers one question
 How each requirement is decided, for enabled policies that apply to the account:
 
 - **MFA** counts when a policy for all resources requires a phishing-resistant authentication strength. A policy for selected resources (for example only the Microsoft Admin Portals), or for all resources with exclusions, does not count and gives Weak.
-- **Device** counts when the grant requires a compliant device, a hybrid joined device, or both, for all resources. A policy that accepts "compliant, hybrid joined, **or** MFA" does not guarantee a device and shows as weaker. Microsoft Entra joined devices are covered through compliance, because there is no separate join requirement.
-- **Location** counts for a policy that blocks access from all locations except trusted ones. The excluded locations are read from the named locations: IP ranges marked trusted or the Global Secure Access compliant network count; a country list is weaker and does not count for the verdict.
+- **Device** counts when the grant requires a compliant device, a hybrid joined device, or both, for all resources. A policy that accepts "compliant, hybrid joined, **or** MFA" does not guarantee a device and shows as weaker. A device filter in exclude mode (for example an exception for one VM) shows as partial and is not counted; a device filter in include mode is not counted. Microsoft Entra joined devices are covered through compliance, because there is no separate join requirement.
+- **Location** counts for a policy that blocks access from all locations except trusted ones. The excluded locations are read from the named locations: IP ranges marked trusted count; a country list is weaker and does not count for the verdict.
 - **Sign-in frequency** is shown in the access protection view only. It takes the strictest frequency among the policies that apply; "every time" counts as 0. Microsoft publishes no single value for administrators, so `-MaxSignInFrequencyHours` is this report's own limit (default 4). Learn's own template uses 1 hour for unmanaged devices and recommends longer sessions only on managed ones.
 - Any other narrowing condition (platform, client app, risk, device filter) makes a policy partial. Report-only policies are listed but not counted. Break-glass accounts are meant to be excluded from these policies, so they show N/A.
 
@@ -210,7 +210,7 @@ Global Administrator, Privileged Role Administrator and Privileged Authenticatio
 - **Size**: not measured for very large tenants (hundreds of administrators).
 ## Limits
 
-- **Trusted device and location** are read from the policy configuration only. Device filters (for example privileged access workstation rules), authentication contexts and "require re-authentication on PIM activation" are not evaluated. IP-based locations behind a VPN or cloud proxy are unreliable; Learn recommends Global Secure Access with source IP restoration or a device requirement instead.
+- **Trusted device and location** are read from the policy configuration only. Device filters (for example privileged access workstation rules), authentication contexts and "require re-authentication on PIM activation" are not evaluated. IP-based locations behind a VPN or cloud proxy are unreliable; Learn recommends a device requirement instead.
 - **Auth methods** shows what is registered, not which method was used at sign-in. The registration report does not cover disabled users and can be a few hours behind.
 - **GDAP partner access** is not covered. Partner technicians who sign in through GDAP have no account in your tenant and their roles are assigned to security groups in the partner tenant, so they are not in the administrator list. Only partner users who were also invited as guests with roles in your tenant appear, as guests.
 - **Certificate-based authentication** is listed among the registered methods in the portal, but the exact value the Graph API returns for it has not been verified, and a certificate only counts as phishing-resistant when it is bound as multifactor in the tenant's CBA settings, which the report does not read. Check one CBA account on the first real run.
@@ -250,7 +250,7 @@ Eligible assignments need Privileged Identity Management (Entra ID P2 or Entra I
 | `-InactiveDays` | Int | `90` | Days without a sign-in after which an administrator is flagged as inactive. |
 | `-MaxSignInFrequencyHours` | Int | `4` | Longest sign-in frequency, in hours, accepted for administrators in the Conditional Access review. Used only with the P1 and P2 baselines. |
 | `-TenantId` | String | None | Entra ID tenant ID. Required for Service Principal authentication. |
-| `-OutputPath` | String | Auto-generated | Path for the HTML report. Defaults to `EntraIDAdminReport_{TenantName}_{yyyy-MM-dd_HHmmss}.html` with the time in UTC. A path you pass is used unchanged. The CSV export uses the same name with `.csv`. |
+| `-OutputPath` | String | Auto-generated | Path for the HTML report. Defaults to `EntraIDAdminReport_{TenantName}_{yyyy-MM-dd}.html`. A rerun on the same day overwrites the report. The CSV export uses the same name as the HTML report, with `.csv`. |
 | `-DryRun` | Switch | None | Run the analysis but skip writing the report and opening the browser. |
 | `-NonInteractive` | Switch | None | Suppress prompts and the browser launch. Required for pipeline runs. |
 | `-UseManagedIdentity` | Switch | None | Authenticate with the Managed Identity of the host. Add `-ClientId` for a user-assigned identity. |

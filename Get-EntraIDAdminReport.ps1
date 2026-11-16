@@ -12,7 +12,7 @@
 .AUTHOR
     Matej Klemencic (www.matej.guru)
 .NOTES
-    Version:        v26.11.15
+    Version:        v26.11.16
 
     Installation: Install the Microsoft Graph authentication module (v2.0.0 or later). The script talks to
     Microsoft Graph directly through Invoke-MgGraphRequest, so no other Graph module is required:
@@ -35,7 +35,7 @@
 .PARAMETER TenantId
     Optional. The Entra ID tenant ID to connect to. Required when using Service Principal authentication.
 .PARAMETER OutputPath
-    Path to save the generated HTML report. Defaults to "EntraIDAdminReport_{TenantName}_{yyyy-MM-dd_HHmmss}.html" with the time in UTC. A path you pass is used unchanged. The CSV export uses the same name with the .csv extension.
+    Path to save the generated HTML report. Defaults to "EntraIDAdminReport_{TenantName}_{yyyy-MM-dd}.html". A report from the same day overwrites the previous one. The CSV export uses the same name as the HTML report with the .csv extension.
 .PARAMETER InactiveDays
     Number of days without a sign-in after which an administrator account is flagged as inactive.
     Default is 90.
@@ -119,7 +119,7 @@ $ErrorActionPreference = 'Stop'
 if ($NonInteractive) { $ProgressPreference = 'SilentlyContinue' }
 
 # Script version - keep in sync with the .NOTES header above; surfaced in the report footer
-$ScriptVersion = 'v26.11.15'
+$ScriptVersion = 'v26.11.16'
 
 # A pipeline variable arrives as one comma-separated string; accept both forms
 $BreakGlassAccounts = @($BreakGlassAccounts | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -464,7 +464,7 @@ function Get-AccessVerdictKey {
         return $(if (@($Admin.CaPolicies | Where-Object { $_.State -ne 'enabled' -and $_.Result -eq 'yes' }).Count -gt 0) { 'reportonly' } else { 'excluded' })
     }
     if ($Admin.CaKey -in @('excluded', 'na')) { return 'na' }
-    $trustedLocation = $Admin.LocKey -in @('gsa', 'ip')
+    $trustedLocation = $Admin.LocKey -in @('ip')
     if ($Admin.CaKey -eq 'pr') {
         if ($Admin.DeviceKey -eq 'device' -and $trustedLocation) { return 'strong' }
         if ($Admin.DeviceKey -eq 'device' -or $trustedLocation) { return 'good' }
@@ -482,7 +482,7 @@ function Get-PolicyCounts {
     if ($Policy.State -ne 'enabled' -or $Policy.Result -ne 'yes') { return $counts }
     if ($Policy.Requirement -eq 'pr' -and $Policy.Full) { $counts += 'mfa' }
     if ($Policy.AllResources -and $Policy.DeviceMode -eq 'required' -and $Policy.Narrowed.Count -eq 0) { $counts += 'device' }
-    if ($Policy.AllResources -and $Policy.LocationKind -in @('gsa', 'ip') -and $Policy.NarrowedOther.Count -eq 0) { $counts += 'location' }
+    if ($Policy.AllResources -and $Policy.LocationKind -eq 'ip' -and $Policy.NarrowedOther.Count -eq 0) { $counts += 'location' }
     return $counts
 }
 
@@ -507,10 +507,11 @@ function Get-PolicyNotCountedText {
     if ($Policy.ScopeLabel -eq 'All resources, with exclusions') { return 'No - all resources with exclusions' }
     if (-not $Policy.AllResources) { return 'No - only some resources' }
     $narrow = if ($Policy.LocationKind -ne 'none') { @($Policy.NarrowedOther) } else { @($Policy.Narrowed) }
+    if ($Policy.DeviceMode -eq 'partial' -and @($narrow | Where-Object { $_ -ne 'device filter exclusion' }).Count -eq 0) { return 'No - partial, a device filter excludes some devices' }
     if ($narrow.Count -gt 0) { return 'No - only some sign-ins' }
     if ($Policy.Requirement -eq 'mfa') { return 'No - not phishing-resistant' }
     if ($Policy.DeviceMode -eq 'optional') { return 'No - MFA is an alternative to the device' }
-    if ($Policy.LocationKind -in @('country', 'other')) { return 'No - not a trusted IP range or GSA network' }
+    if ($Policy.LocationKind -in @('country', 'other')) { return 'No - not a trusted IP range' }
     return 'No - does not meet a requirement'
 }
 
@@ -553,20 +554,24 @@ function Get-AccessRequirements {
             $opt = @($devicePolicies | Where-Object { $_.DeviceMode -eq 'optional' } | Sort-Object Name | Select-Object -First 1)
             @{ State = 'weaker'; Detail = "$(ConvertTo-HtmlSafe $opt[0].Name) accepts a compliant or hybrid joined device, but MFA is an alternative, so it is not guaranteed." }
         }
+        'partial' {
+            $part = @($devicePolicies | Where-Object { $_.DeviceMode -eq 'partial' } | Sort-Object Name | Select-Object -First 1)
+            @{ State = 'weaker'; Detail = "$(ConvertTo-HtmlSafe $part[0].Name) requires a compliant or hybrid joined device, but a device filter excludes some devices, so it is only partial." }
+        }
         default { @{ State = 'missing'; Detail = (New-NotCountedDetail $devicePolicies $none 'No policy requires it for all resources') } }
     }
 
     # Location
     $locationPolicies = @($policies | Where-Object { $_.LocationKind -ne 'none' })
     $location = switch ($Admin.LocKey) {
-        { $_ -in @('gsa', 'ip') } { @{ State = 'met'; Detail = (& $withMore (& $countingFor 'location')) } }
-        { $_ -in @('country', 'other') } { @{ State = 'weaker'; Detail = "Access is limited to $(ConvertTo-HtmlSafe $Admin.LocLabel) only, which is weaker than a trusted IP range or the GSA network." } }
-        default { @{ State = 'missing'; Detail = (New-NotCountedDetail $locationPolicies $none 'No policy limits access to a trusted IP range or the GSA network') } }
+        { $_ -eq 'ip' } { @{ State = 'met'; Detail = (& $withMore (& $countingFor 'location')) } }
+        { $_ -in @('country', 'other') } { @{ State = 'weaker'; Detail = "Access is limited to $(ConvertTo-HtmlSafe $Admin.LocLabel) only, which is weaker than a trusted IP range." } }
+        default { @{ State = 'missing'; Detail = (New-NotCountedDetail $locationPolicies $none 'No policy limits access to a trusted IP range') } }
     }
     return @(
         @{ Label = 'Phishing-resistant MFA'; Sub = ''; State = $mfa.State; Detail = $mfa.Detail }
         @{ Label = 'Compliant or hybrid joined device'; Sub = ''; State = $device.State; Detail = $device.Detail }
-        @{ Label = 'Trusted location'; Sub = ' (trusted IP range or Global Secure Access)'; State = $location.State; Detail = $location.Detail }
+        @{ Label = 'Trusted location'; Sub = ' (trusted IP range)'; State = $location.State; Detail = $location.Detail }
     )
 }
 
@@ -671,7 +676,7 @@ function New-NoMfaNoCaModalHtml {
     $html = "<div class='modal-banner red'><span class='modal-dot'></span><span>No MFA is enforced for this account</span></div>"
     $html += New-AccessRequirementRow 'MFA on every sign-in' '' 'missing' 'Missing' 'Security defaults are disabled and no Conditional Access policy applies'
     $html += New-AccessRequirementRow 'Compliant or hybrid joined device' '' 'na' 'Not available' 'Requires Conditional Access'
-    $html += New-AccessRequirementRow 'Trusted location' ' (trusted IP range or Global Secure Access)' 'na' 'Not available' 'Requires Conditional Access'
+    $html += New-AccessRequirementRow 'Trusted location' ' (trusted IP range)' 'na' 'Not available' 'Requires Conditional Access'
     $html += "<div class='modal-rec'><strong>Recommended:</strong> Enable security defaults. It requires MFA for administrators and blocks legacy authentication.</div>"
     return $html
 }
@@ -751,7 +756,7 @@ function New-AccessModalHtml {
         }
         # Recommendation
         $recommendation = switch ($Verdict) {
-            'mfaonly' { 'Add a Conditional Access policy that requires a compliant or hybrid joined device, or limits sign-in to a trusted IP range or Global Secure Access, for administrators.' }
+            'mfaonly' { 'Add a Conditional Access policy that requires a compliant or hybrid joined device, or limits sign-in to a trusted IP range, for administrators.' }
             'none'    { 'Create a Conditional Access policy that requires phishing-resistant MFA for administrators, then add a compliant or hybrid joined device or a trusted location requirement.' + $(if ($script:enabledCaPolicyCount -eq 0 -and $script:securityDefaultsKnown) { ' If no Conditional Access policies are in use, security defaults can serve as a temporary baseline.' } else { '' }) }
             'weak'    { switch ($Admin.CaKey) {
                             'mfa'     { 'Require a phishing-resistant authentication strength (passkey (FIDO2) or Windows Hello for Business) for administrators, then add a device or location requirement.' }
@@ -776,16 +781,19 @@ function New-AccessModalHtml {
     $policies = @($Admin.CaPolicies | Where-Object { $_.Result -ne 'excluded' })
     $countLabel = @{ mfa = 'phishing-resistant MFA'; device = 'compliant or hybrid joined device'; location = 'trusted location' }
     if ($policies.Count -gt 0) {
-        $rows = ($policies | Sort-Object @{ Expression = { @(Get-PolicyCounts $_).Count -eq 0 } }, Name | ForEach-Object {
+        # Order: counted policies, then partial ones (the weaker states in the requirements), then the rest
+        $partialTexts = @('No - partial, a device filter excludes some devices', 'No - MFA is an alternative to the device', 'No - not a trusted IP range', 'No - not phishing-resistant', 'No - applies after role activation')
+        $policyGroup = { param($p) if (@(Get-PolicyCounts $p).Count -gt 0) { 0 } elseif ((Get-PolicyNotCountedText $p) -in $partialTexts) { 1 } else { 2 } }
+        $rows = ($policies | Sort-Object @{ Expression = { & $policyGroup $_ } }, Name | ForEach-Object {
             $counts = @(Get-PolicyCounts $_)
             $narrowing = if ($_.LocationKind -ne 'none') { $_.NarrowedOther } else { $_.Narrowed }
             $scope = $_.ScopeLabel + $(if ($_.ScopeDetail) { " - $($_.ScopeDetail)" } else { '' }) + $(if (@($narrowing).Count -gt 0) { " (only: $(@($narrowing) -join ', '))" } else { '' })
             $adds = @()
-            if ($_.DeviceMode -ne 'none') { $adds += "Device: $($_.DeviceLabel)$(if ($_.DeviceMode -eq 'optional') { ' (optional)' })" }
+            if ($_.DeviceMode -ne 'none') { $adds += "Device: $($_.DeviceLabel)$(if ($_.DeviceMode -eq 'optional') { ' (optional)' } elseif ($_.DeviceMode -eq 'partial') { ' (partial, device filter exclusion)' })" }
             if ($_.LocationKind -ne 'none') { $adds += "Location: only $($_.LocationLabels -join ', ')" }
             if ($null -ne $_.SifHours) { $adds += "Sign-in frequency: $(Format-Hours $_.SifHours)" }
             $requires = ConvertTo-HtmlSafe ((@($_.RequirementLabel) + $adds) -join '; ')
-            $countsHtml = if ($counts.Count -gt 0) { "<span class='ap-yes'>Yes - $(ConvertTo-HtmlSafe (($counts | ForEach-Object { $countLabel[$_] }) -join ', '))</span>" } else { ConvertTo-HtmlSafe (Get-PolicyNotCountedText $_) }
+            $countsHtml = if ($counts.Count -gt 0) { "<span class='ap-yes'>Yes - $(ConvertTo-HtmlSafe (($counts | ForEach-Object { $countLabel[$_] }) -join ', '))</span>" } else { $notCounted = ConvertTo-HtmlSafe (Get-PolicyNotCountedText $_); if ((Get-PolicyNotCountedText $_) -in $partialTexts) { "<span class='ap-amber'>$notCounted</span>" } else { $notCounted } }
             New-ModalRowHtml @((ConvertTo-HtmlSafe $_.Name), $requires, (ConvertTo-HtmlSafe $scope), $countsHtml)
         }) -join ''
         $noneCounted = @($policies | Where-Object { @(Get-PolicyCounts $_).Count -gt 0 }).Count -eq 0
@@ -1114,7 +1122,9 @@ function Get-CaPolicySummary {
     if (@(@($conditions.clientAppTypes) | Where-Object { $_ }).Count -gt 0 -and @($conditions.clientAppTypes) -notcontains 'all') { $narrowed.Add('client app') }
     if (@(@($conditions.userRiskLevels) | Where-Object { $_ }).Count -gt 0) { $narrowed.Add('user risk') }
     if (@(@($conditions.signInRiskLevels) | Where-Object { $_ }).Count -gt 0) { $narrowed.Add('sign-in risk') }
-    if ($conditions.devices) { $narrowed.Add('device filter') }
+    # A device filter in exclude mode only leaves some devices out, so it is shown as partial for the device requirement
+    $deviceFilterExcludes = [string]$conditions.devices.deviceFilter.mode -eq 'exclude'
+    if ($conditions.devices) { $narrowed.Add($(if ($deviceFilterExcludes) { 'device filter exclusion' } else { 'device filter' })) }
     if ($conditions.authenticationFlows) { $narrowed.Add('authentication flow') }
     if (@(@($conditions.insiderRiskLevels) | Where-Object { $_ }).Count -gt 0) { $narrowed.Add('insider risk') }
 
@@ -1128,7 +1138,7 @@ function Get-CaPolicySummary {
     $deviceMode = 'none'; $deviceLabel = ''
     if ($deviceControls.Count -gt 0 -and $builtIn -notcontains 'block') {
         $otherGrant = @($builtIn | Where-Object { $_ -notin @('compliantDevice', 'domainJoinedDevice') }).Count + $(if ($strength) { 1 } else { 0 })
-        $deviceMode = if ([string]$grant.operator -eq 'OR' -and $otherGrant -gt 0) { 'optional' } else { 'required' }
+        $deviceMode = if ([string]$grant.operator -eq 'OR' -and $otherGrant -gt 0) { 'optional' } elseif ($deviceFilterExcludes) { 'partial' } else { 'required' }
         $deviceLabel = if ($deviceControls.Count -eq 2) { if ([string]$grant.operator -eq 'OR') { 'Compliant or hybrid joined' } else { 'Compliant and hybrid joined' } }
                        elseif ($deviceControls -contains 'compliantDevice') { 'Compliant' } else { 'Hybrid joined' }
     }
@@ -1143,7 +1153,7 @@ function Get-CaPolicySummary {
             elseif ($LocationsById.ContainsKey([string]$excluded)) { $named = $LocationsById[[string]$excluded]; $kinds.Add($named.Type); $labels.Add($named.Name) }
             else { $kinds.Add('other'); $labels.Add([string]$excluded) }
         }
-        $locationKind = if ($kinds -contains 'gsa') { 'gsa' } elseif ($kinds -contains 'ip') { 'ip' } elseif ($kinds -contains 'country') { 'country' } elseif ($kinds.Count -gt 0) { 'other' } else { 'none' }
+        $locationKind = if ($kinds -contains 'ip') { 'ip' } elseif ($kinds -contains 'country') { 'country' } elseif ($kinds.Count -gt 0) { 'other' } else { 'none' }
         $locationLabels = @($labels)
     }
 
@@ -1339,8 +1349,8 @@ function Get-AdminAssessment {
         # With phishing-resistant MFA enforced, Microsoft pairs it with a compliant or hybrid joined device and/or trusted
         # locations, and a bounded session
         if ($Admin.CaKey -eq 'pr') {
-            if ($Admin.DeviceKey -ne 'device' -and $Admin.LocKey -notin @('gsa', 'ip')) {
-                $note = if ($Admin.DeviceKey -eq 'optional') { ' A device requirement exists, but MFA is an alternative to it, so it is not guaranteed.' } elseif ($Admin.LocKey -in @('country', 'other')) { ' Only a country or other location restriction applies, which is weaker than a trusted IP range or the Global Secure Access compliant network.' } else { '' }
+            if ($Admin.DeviceKey -ne 'device' -and $Admin.LocKey -notin @('ip')) {
+                $note = if ($Admin.DeviceKey -eq 'optional') { ' A device requirement exists, but MFA is an alternative to it, so it is not guaranteed.' } elseif ($Admin.DeviceKey -eq 'partial') { ' A device requirement exists, but a device filter excludes some devices, so it is only partial.' } elseif ($Admin.LocKey -in @('country', 'other')) { ' Only a country or other location restriction applies, which is weaker than a trusted IP range.' } else { '' }
                 $findings.Add((New-Reason 'medium' 'Phishing-resistant MFA, but no device or location requirement. Add a policy that requires a compliant device or a trusted location' -Detail $note.Trim()))
             }
             if ($Admin.SifKey -eq 'none') { $findings.Add((New-Reason 'low' "No sign-in frequency set, so sessions are not bounded. Set one of at most $MaxSignInFrequencyHours hours" -Detail $(if ($script:pimBaseline) { 'For the Azure portal and the Entra admin center you can also require re-authentication on PIM activation.' } else { '' }))) }
@@ -1649,22 +1659,23 @@ try {
             foreach ($strength in (Get-GraphCollection 'v1.0/identity/conditionalAccess/authenticationStrength/policies')) { $strengthsById[[string]$strength.id] = $strength }
         }
         catch { Write-Verbose "Authentication strength policies could not be read: $($_.Exception.Message)" }
-        # Named locations: an excluded location tells whether a block policy restricts access to an IP range, a country
-        # or the Global Secure Access compliant network
+        # Named locations: an excluded location tells whether a block policy restricts access to an IP range or a country
+        # (the compliant network location counts as a trusted location only when it is marked trusted)
         $namedLocationsById = @{}
         try {
-            foreach ($location in (Get-GraphCollection 'v1.0/identity/conditionalAccess/namedLocations')) {
+            foreach ($location in (Get-GraphCollection 'beta/identity/conditionalAccess/namedLocations')) {
                 $locationType = switch ([string]$location.'@odata.type') {
                     '#microsoft.graph.ipNamedLocation' { 'ip' }
                     '#microsoft.graph.countryNamedLocation' { 'country' }
-                    '#microsoft.graph.compliantNetworkNamedLocation' { 'gsa' }
+                    '#microsoft.graph.compliantNetworkNamedLocation' { if ($location.isTrusted -eq $true) { 'ip' } else { 'other' } }
                     default { 'other' }
                 }
                 $namedLocationsById[[string]$location.id] = @{ Name = [string]$location.displayName; Type = $locationType }
             }
         }
         catch { Write-Verbose "Named locations could not be read: $($_.Exception.Message)" }
-        $caPolicies = @(Get-GraphCollection 'v1.0/identity/conditionalAccess/policies' | Where-Object { $_.state -ne 'disabled' } | ForEach-Object { Get-CaPolicySummary $_ $strengthsById $namedLocationsById })
+        # beta: v1.0 omits policies that use the Global Secure Access compliant network, so they would be missing from the report
+        $caPolicies = @(Get-GraphCollection 'beta/identity/conditionalAccess/policies' | Where-Object { $_.state -ne 'disabled' } | ForEach-Object { Get-CaPolicySummary $_ $strengthsById $namedLocationsById })
     }
     try {
         $script:securityDefaults = [bool](Invoke-MgWithRetry { Invoke-MgGraphRequest -Method GET -Uri 'v1.0/policies/identitySecurityDefaultsEnforcementPolicy' -ErrorAction Stop }).isEnabled
@@ -1857,9 +1868,10 @@ foreach ($u in $rawUsers.Values) {
         else {
             $applying = @($admin.CaPolicies | Where-Object { $_.State -eq 'enabled' -and $_.Result -eq 'yes' -and $_.AllResources })
             $devicePolicies = @($applying | Where-Object { $_.DeviceMode -eq 'required' -and $_.Narrowed.Count -eq 0 })
-            $admin.DeviceKey = if ($devicePolicies.Count -gt 0) { 'device' } elseif (@($applying | Where-Object { $_.DeviceMode -eq 'optional' }).Count -gt 0) { 'optional' } else { 'none' }
+            $partialDevicePolicies = @($applying | Where-Object { $_.DeviceMode -eq 'partial' -and @($_.Narrowed | Where-Object { $_ -ne 'device filter exclusion' }).Count -eq 0 })
+            $admin.DeviceKey = if ($devicePolicies.Count -gt 0) { 'device' } elseif ($partialDevicePolicies.Count -gt 0) { 'partial' } elseif (@($applying | Where-Object { $_.DeviceMode -eq 'optional' }).Count -gt 0) { 'optional' } else { 'none' }
             $admin.DeviceLabel = (@($devicePolicies | ForEach-Object { $_.DeviceLabel }) | Sort-Object -Unique) -join ', '
-            $locationRank = @{ gsa = 4; ip = 3; country = 2; other = 1 }
+            $locationRank = @{ ip = 3; country = 2; other = 1 }
             $bestLocation = @($applying | Where-Object { $_.LocationKind -ne 'none' -and $_.NarrowedOther.Count -eq 0 } | Sort-Object @{ Expression = { $locationRank[$_.LocationKind] }; Descending = $true }) | Select-Object -First 1
             $admin.LocKey = if ($bestLocation) { $bestLocation.LocationKind } else { 'none' }
             $admin.LocLabel = if ($bestLocation) { $bestLocation.LocationLabels -join ', ' } else { '' }
@@ -1927,7 +1939,7 @@ $inactiveCount   = @($humanReport | Where-Object { $_.ActivityBucket -in @('inac
 $breakGlassCount = @($report | Where-Object { $_.IsBreakGlass }).Count
 $likelyBreakGlassCount = @($report | Where-Object { $_.LikelyBreakGlass }).Count
 $noPhishingResistantCount = @($humanReport | Where-Object { $_.AuthCollected -and $_.AuthKey -in @('pwl', 'mfa', 'sf') }).Count
-# No compliant or hybrid joined device and no trusted IP or compliant network required (break-glass accounts are meant to be excluded)
+# No compliant or hybrid joined device and no trusted IP range required (break-glass accounts are meant to be excluded)
 foreach ($r in $report) { $r | Add-Member -NotePropertyName AccessKey -NotePropertyValue (Get-AccessVerdictKey $r) -Force }
 # Privileged role assignments as Microsoft Entra counts them: one per assignment, groups counted once
 $privilegedAssignmentCount = @($rawEntries | Where-Object { $_.Kind -eq 'Entra' -and $_.Privileged -and $_.ScopeKind -eq 'tenant' -and $_.Type -eq 'Active' -and $_.RoleId -ne $SyncRoleId }).Count
@@ -1983,12 +1995,10 @@ if ($script:caDataAvailable -and $script:securityDefaultsKnown) {
 if (-not $script:pimBaseline) { $tenantFindings.Add((New-Reason 'info' 'Privileged Identity Management is not part of the assessment baseline. Role assignments are shown as assigned.')) }
 if ($script:sdConflict) { $tenantAccessBanner += '<!-- debug: security defaults are reported as enabled while Conditional Access policies are enabled; the Conditional Access logic was used -->' }
 
-# One UTC time stamp for the HTML and CSV file names
+# Default HTML file name: one report per tenant and day, a rerun overwrites it
 $safeName = $tenantName -replace '[^\w]', '_'
-$fileStamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd_HHmmss')
-$fileBaseName = "EntraIDAdminReport_${safeName}_${fileStamp}"
 if (-not $OutputPath) {
-    $OutputPath = "$fileBaseName.html"
+    $OutputPath = "EntraIDAdminReport_${safeName}_$(Get-Date -Format 'yyyy-MM-dd').html"
 }
 
 # Resolve a relative output path against the current PowerShell location.
@@ -2623,12 +2633,12 @@ $devLocFilterHtml = if ($script:caBaseline) { @"
         <div class="filter-group">
             <span class="filter-group-label">Trusted device</span>
             <span class="filter-tag c-green"  data-group="device" data-value="device"   onclick="toggleTag(this)">Compliant / Hybrid <span class="cnt"></span></span>
+            <span class="filter-tag c-amber"  data-group="device" data-value="partial"  onclick="toggleTag(this)">Partial <span class="cnt"></span></span>
             <span class="filter-tag c-amber"  data-group="device" data-value="optional" onclick="toggleTag(this)">Optional <span class="cnt"></span></span>
             <span class="filter-tag c-gray"   data-group="device" data-value="none"     onclick="toggleTag(this)">None <span class="cnt"></span></span>
         </div>
         <div class="filter-group">
             <span class="filter-group-label">Trusted location</span>
-            <span class="filter-tag c-green"  data-group="loc" data-value="gsa"     onclick="toggleTag(this)">GSA network <span class="cnt"></span></span>
             <span class="filter-tag c-green"  data-group="loc" data-value="ip"      onclick="toggleTag(this)">Trusted IP <span class="cnt"></span></span>
             <span class="filter-tag c-amber"  data-group="loc" data-value="country" onclick="toggleTag(this)">Country <span class="cnt"></span></span>
             <span class="filter-tag c-amber"  data-group="loc" data-value="other"   onclick="toggleTag(this)">Other <span class="cnt"></span></span>
@@ -2947,10 +2957,10 @@ foreach ($a in $sortedReport) {
                 "<span class='ap-pill $state' title='$(ConvertTo-HtmlSafe $tip)' onclick=`"$caOnClick`">$symbol $name</span>"
             }
             $mfaState = switch ($a.CaKey) { 'pr' { 'ok' } { $_ -in @('mfa', 'partial', 'activation') } { 'warn' } default { 'none' } }
-            $devState = switch ($a.DeviceKey) { 'device' { 'ok' } 'optional' { 'warn' } default { 'none' } }
-            $locState = switch ($a.LocKey) { { $_ -in @('gsa', 'ip') } { 'ok' } { $_ -in @('country', 'other') } { 'warn' } default { 'none' } }
+            $devState = switch ($a.DeviceKey) { 'device' { 'ok' } { $_ -in @('optional', 'partial') } { 'warn' } default { 'none' } }
+            $locState = switch ($a.LocKey) { { $_ -eq 'ip' } { 'ok' } { $_ -in @('country', 'other') } { 'warn' } default { 'none' } }
             if ($accessKey -eq 'sd') { $mfaState = 'ok'; $devState = 'none'; $locState = 'none' }
-            $strip = "<span class='ap-strip csv-exclude'>$(& $pillState $mfaState 'MFA' 'Phishing-resistant MFA required for all resources: check marks it as met, a tilde as weaker, a dash as missing.')$(& $pillState $devState 'Device' 'Compliant or hybrid joined device required for all resources.')$(& $pillState $locState 'Location' 'Access limited to a trusted IP range or the Global Secure Access network.')</span>"
+            $strip = "<span class='ap-strip csv-exclude'>$(& $pillState $mfaState 'MFA' 'Phishing-resistant MFA required for all resources: check marks it as met, a tilde as weaker, a dash as missing.')$(& $pillState $devState 'Device' 'Compliant or hybrid joined device required for all resources.')$(& $pillState $locState 'Location' 'Access limited to a trusted IP range.')</span>"
             $reqText = @{ ok = 'Met'; warn = 'Weaker'; none = 'Missing' }
             $mfaReq = $reqText[$mfaState]; $devReq = $reqText[$devState]; $locReq = $reqText[$locState]
             if ($accessKey -eq 'sd') { $devReq = $locReq = $(if (-not $script:caBaseline) { 'Not available' } else { 'Not configured' }) }
@@ -3117,7 +3127,7 @@ $reportDetailsBlock = "const reportDetails = {`n" + ($modalDataEntries -join ",`
 
     <script>
         $reportDetailsBlock
-        const csvFileName = $(ConvertTo-JsString "$fileBaseName.csv");
+        const csvFileName = $(ConvertTo-JsString ([System.IO.Path]::GetFileNameWithoutExtension($OutputPath) + ".csv"));
 "@)
 
 [void]$sb.Append(@'
@@ -3138,7 +3148,7 @@ $reportDetailsBlock = "const reportDetails = {`n" + ($modalDataEntries -join ",`
             partial: 'Partial', activation: 'After activation', none: 'None',
             mailbox: 'Mailbox', productivity: 'Productivity', other: 'Other', missing: 'Missing', set: 'Set',
             active: 'Active', inactive: 'Inactive', never: 'Never',
-            yes: 'Yes', no: 'No', likely: 'Likely', connector: 'Entra Connect sync account', device: 'Compliant / Hybrid', optional: 'Optional', gsa: 'GSA network', ip: 'Trusted IP', country: 'Country', long: 'Above limit', unexpected: 'Sync role on other account'
+            yes: 'Yes', no: 'No', likely: 'Likely', connector: 'Entra Connect sync account', device: 'Compliant / Hybrid', optional: 'Optional', partial: 'Partial', ip: 'Trusted IP', country: 'Country', long: 'Above limit', unexpected: 'Sync role on other account'
         };
 
         function rowMatchesTag(row, group, value) {
